@@ -11,6 +11,7 @@ from .architect import UniverseArchitect
 from .canon import NarrativeCanon
 from .discovery import DiscoveryTracker
 from .evidence import NarrativeEvidenceResolver
+from .models import DossierFact, LoreExpansion
 from .provider import LoreAwareProvider, narrative_provider_from_environment
 from .science import GenerativeScienceEngine, ScienceArchitect, ScientificCanon, ScientificRuntime
 from .world import OffscreenWorldSimulator
@@ -176,6 +177,7 @@ class UniverseGodGameSession(GameSession):
             evidence_events = self.evidence_resolver.resolve_scan_events(self.state, self.engine, events)
             events.extend(evidence_events)
             science_events = self.science_runtime.process_events(self.state, self.engine, list(events))
+            self._promote_scientific_events(science_events)
             events.extend(science_events)
             world_events = self.offscreen_world.execute_due(self.state, self.engine)
             events.extend(world_events)
@@ -193,9 +195,57 @@ class UniverseGodGameSession(GameSession):
                 self._schedule_director(self.state.current_encounter.id)
         return events
 
+    def _promote_scientific_events(self, events: list[CanonicalEvent]) -> None:
+        """Make verified science available to future Universe God reasoning without making NPCs omniscient."""
+        for event in events:
+            if event.event_type == "scientific_prediction_verified":
+                phenomenon_id = str(event.payload.get("phenomenon_id", ""))
+                prediction_id = str(event.payload.get("prediction_id", ""))
+                reveal = str(event.payload.get("reveal", "")).strip()
+                blueprint = self.scientific_canon.document.phenomena.get(phenomenon_id)
+                if not blueprint or not prediction_id or not reveal:
+                    continue
+                question = f"verified-science:{prediction_id}"
+                if self.narrative_canon.question_already_expanded(question, blueprint.encounter_id):
+                    continue
+                self.narrative_canon.commit_expansion(LoreExpansion(
+                    encounter_id=blueprint.encounter_id,
+                    question=question,
+                    summary=f"The crew experimentally verified a new scientific result concerning {blueprint.name}.",
+                    new_facts=[DossierFact(
+                        subject=blueprint.name,
+                        content=reveal,
+                        visibility="director",
+                        known_by=[],
+                    )],
+                ))
+            elif event.event_type == "generated_scientific_capability_installed":
+                phenomenon_id = str(event.payload.get("phenomenon_id", ""))
+                capability = event.payload.get("capability") or {}
+                name = str(capability.get("name", "")).strip() if isinstance(capability, dict) else ""
+                blueprint = self.scientific_canon.document.phenomena.get(phenomenon_id)
+                if not blueprint or not name:
+                    continue
+                question = f"generated-capability:{name.lower()}"
+                if self.narrative_canon.question_already_expanded(question, blueprint.encounter_id):
+                    continue
+                description = str(capability.get("description", "")).strip() if isinstance(capability, dict) else ""
+                self.narrative_canon.commit_expansion(LoreExpansion(
+                    encounter_id=blueprint.encounter_id,
+                    question=question,
+                    summary=f"The crew added a persistent scientific capability to {self.state.ship.name}.",
+                    new_facts=[DossierFact(
+                        subject=self.state.ship.name,
+                        content=f"Carries the generated scientific capability {name}. {description}".strip(),
+                        visibility="director",
+                        known_by=[],
+                    )],
+                ))
+
     def _schedule_milestones(self, events: list[CanonicalEvent]) -> None:
         command_science_events = self.science_runtime.process_events(self.state, self.engine, list(events))
         if command_science_events:
+            self._promote_scientific_events(command_science_events)
             self._persist(command_science_events)
             events = [*events, *command_science_events]
         super()._schedule_milestones(events)

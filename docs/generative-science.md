@@ -64,7 +64,7 @@ The motif does not have to be a glyph. The AI can use the same mechanism for an 
 
 A phenomenon may optionally propose a capability blueprint. It is validated against installed domains, bounded power requirements, a permitted analysis-operation list, and explicit prerequisites. Dangerous outputs such as weapons, arbitrary damage, teleportation, free energy, or unrestricted repair are rejected.
 
-Capabilities can be acquired as software, a field modification, or salvage. They are installed only after their required scientific predictions have actually been verified (and, for salvage, after the recovery event). Once installed they become normal persistent `Capability` objects on the ship and are visible to later AI-authored science as part of the crew's real equipment history.
+Capabilities can be acquired as software, a field modification, or salvage. They are installed only after their required scientific predictions have actually been verified; salvage-mode capabilities additionally require the relevant recovery event. Once installed they become normal persistent `Capability` objects on the ship and are visible to later AI-authored science as part of the crew's real equipment history.
 
 ## Novelty budget
 

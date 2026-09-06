@@ -10,6 +10,10 @@ This branch adds the first persistent deep-narrative layer without changing the 
 - NPC model calls receive only lore that NPC could know, plus public/crew information. Director-only facts are excluded.
 - Ship Computer calls receive only crew-visible narrative canon.
 - When a player asks an NPC an unanticipated culture/history/meaning question, the architect may lazily materialize a small amount of new canon before the NPC answers.
+- AI-authored evidence routes are now bound to the **real deterministic sensor loop**. A clue is revealed only when the crew scans the current encounter target with an installed instrument whose domains match the route and crosses the authored scan threshold.
+- A revealed clue becomes a normal Science `Observation`, a canonical `narrative_evidence_discovered` event, crew knowledge, and a persistent evidence-discovery record. Repeating the same scan cannot rediscover the same clue.
+- Meaningful discoveries and player actions can wake the Universe God to schedule coarse **off-screen actor intentions**. Those intentions persist in canon and execute later according to universe time.
+- Off-screen consequences are intentionally bounded to delayed messages, new leads, relationship shifts, new claims/facts, and coarse social/activity status changes. They cannot directly edit coordinates, hull, damage, cargo, power, resources, or other physical state.
 - Existing physics, sensors, deadlines, equipment, damage, movement, and permissions remain deterministic and server-validated.
 
 ## Model configuration
@@ -26,7 +30,7 @@ uv run space-sim-crew
 
 Any OpenAI-compatible endpoint can be used instead.
 
-Optionally point only the Universe Architect/lore-expansion role at a different model:
+Optionally point only the Universe Architect/lore-expansion/world-planning role at a different model:
 
 ```bash
 export SPACE_CREW_NARRATIVE_BASE_URL=http://127.0.0.1:11434/v1
@@ -36,20 +40,27 @@ export SPACE_CREW_NARRATIVE_PROVIDER=ollama
 
 If these `SPACE_CREW_NARRATIVE_*` variables are absent, the main configured model is reused. No gameplay code depends on a particular model vendor or model name.
 
-## First playtest
+## Deep-narrative playtest
 
 1. Create a new **Random Expedition** universe with a live model enabled.
-2. Wait a few seconds after encounter creation for the Universe Architect task.
-3. Open the save directory and inspect `knowledge/narrative-canon.md`. It should contain a situation premise, persistent entities/facts/questions, and, where appropriate, evidence routes.
-4. If the encounter contains an NPC, ask questions that were not anticipated by the UI, for example:
+2. After encounter creation, inspect `knowledge/narrative-canon.md`. It should contain a situation premise, persistent entities/facts/questions and, where appropriate, evidence routes and scheduled intentions.
+3. In Science, scan the encounter target with different installed instruments. An evidence route only fires if the selected instrument shares one of the route's validated sensor domains and the scan reaches its required fraction.
+4. Watch for story-relevant Science observations rather than generic completion text. The canon file should add an **Evidence actually discovered** section after a successful clue.
+5. If the encounter contains an NPC, ask questions that were not anticipated by the UI, for example:
    - `Why is that custom important to your people?`
    - `Who disagrees with that version of your history?`
    - `What does that name mean?`
    - `How did this practice begin?`
-5. Ask a follow-up about an answer. The canon file should gain a **Lazy lore expansions** section rather than replacing the original facts.
-6. Reload the universe and ask about the same subject again. Previously materialized lore should still constrain the actor.
-7. Check `/api/v1/sessions/<session-id>/diagnostics`; `narrative_canon` reports situation/entity/fact/question/expansion counts and `narrative_provider` reports the model used for architecture.
+6. Ask follow-ups. The canon file should gain **Lazy lore expansions** rather than replacing original facts.
+7. Make a meaningful choice or discovery, then leave the system and continue travelling. The Universe God may have scheduled consequences whose delays are measured in universe time. Use time acceleration during uneventful travel if desired.
+8. Watch Communications, the activity board, and previously known contacts for delayed messages, new leads, or relationship/status changes. `narrative-canon.md` records scheduled and executed intentions.
+9. Reload the universe. Discovered evidence, generated lore, pending intentions, executed consequences, and actor memories should remain.
+10. Check `/api/v1/sessions/<session-id>/diagnostics`; `narrative_canon` now reports evidence-discovery and scheduled/executed-intent counts in addition to situation/entity/fact/question/expansion counts.
 
-## Important current limit
+## Architecture boundary
 
-Universe God v1 establishes the narrative substrate and deep conversational continuity. Generated `evidence` entries are persisted and restricted to domains the ship actually has, but they are not yet converted automatically into new deterministic scan observations. The next implementation slice should bind those evidence routes to the existing sensor pipeline and add scheduled off-screen world intentions/consequences.
+The model still never gets a `set_state` capability. The flow is:
+
+`model proposes lore / evidence / intent -> schema and scope validation -> deterministic scan or world executor -> canonical event -> persistence`
+
+The current off-screen simulation advances only while universe time advances in a running session; it does not yet simulate elapsed wall-clock time while the host is shut down. The next campaign-depth work can broaden the same architecture to long-lived factions, multi-system movement/economics, and richer evidence bound to specific generated objects without weakening the simulation boundary.

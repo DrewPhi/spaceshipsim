@@ -235,6 +235,7 @@ async def test_offscreen_world_plan_executes_after_departure_and_time_advance(tm
     state = _state()
     encounter = state.current_encounter
     assert encounter is not None
+    assert encounter.npc is not None
     provider = NarrativeFakeProvider()
     canon = NarrativeCanon(tmp_path, state.universe_id)
     canon.commit_dossier(
@@ -258,6 +259,7 @@ async def test_offscreen_world_plan_executes_after_departure_and_time_advance(tm
     assert canon.schedule_intents(intents) == 2
     simulator = OffscreenWorldSimulator(canon)
     engine = SimulationEngine(state)
+    initial_disposition = state.known_npcs[encounter.npc.id].disposition
 
     state.universe_time_ms = max(intent.execute_at_ms for intent in intents)
     # Still in the origin system: these were explicitly authored as off-screen consequences.
@@ -270,6 +272,6 @@ async def test_offscreen_world_plan_executes_after_departure_and_time_advance(tm
     assert all(event.event_type == "offscreen_world_intent_executed" for event in events)
     assert any("older register" in entry["message"] for entry in state.message_log)
     remembered = state.known_npcs[encounter.npc.id]
-    assert remembered.disposition == pytest.approx(0.15)
+    assert remembered.disposition == pytest.approx(initial_disposition + 0.15)
     assert remembered.relationship_label == "increasingly trusting contact"
     assert all(intent.status == "executed" for intent in canon.document.scheduled_intents.values())

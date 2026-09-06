@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -173,6 +173,13 @@ def create_app(saves_root: Path | None = None) -> FastAPI:
             if path and candidate.is_file() and candidate.resolve().is_relative_to(dist.resolve()):
                 return FileResponse(candidate)
             return FileResponse(dist / "index.html")
+    else:
+        @app.get("/")
+        async def unbuilt_client() -> HTMLResponse:
+            return HTMLResponse(
+                "<!doctype html><html><head><title>Space Simulation Crew</title></head>"
+                "<body><main><h1>Space Simulation Crew</h1><p>Client assets are not built yet.</p></main></body></html>"
+            )
 
     return app
 

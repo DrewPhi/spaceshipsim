@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .models import StationRole
-from .session import SessionManager
+from .narrative.session import UniverseGodSessionManager as SessionManager
 from .simulation import CommandError
 
 

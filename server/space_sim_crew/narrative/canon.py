@@ -7,15 +7,23 @@ from typing import Any
 
 import yaml
 
-from .models import LoreExpansion, NarrativeCanonDocument, SituationDossier
+from .models import (
+    DossierEvidence,
+    EvidenceDiscovery,
+    LoreExpansion,
+    NarrativeCanonDocument,
+    ScheduledWorldIntent,
+    SituationDossier,
+)
 
 
 class NarrativeCanon:
     """Persistent narrative truth kept outside the live physics checkpoint.
 
     The simulation remains authoritative for physical state. This store is the
-    canonical home for generated lore, claims, questions, and evidence designs.
-    It uses the same human-readable Markdown/YAML convention as the rest of a save.
+    canonical home for generated lore, claims, questions, evidence designs, and
+    coarse off-screen actor intentions. It uses the same human-readable
+    Markdown/YAML convention as the rest of a save.
     """
 
     def __init__(self, saves_root: Path, universe_id: str):
@@ -46,7 +54,7 @@ class NarrativeCanon:
         state = self.document.model_dump(mode="json")
         frontmatter = yaml.safe_dump(
             {
-                "schema_version": 1,
+                "schema_version": self.document.schema_version,
                 "entity_type": "narrative_canon",
                 "universe_id": self.universe_id,
                 "state": state,
@@ -94,12 +102,25 @@ class NarrativeCanon:
                 ))
             if dossier.evidence:
                 sections.append("### Evidence routes\n\n" + "\n".join(
-                    f"- **{item.target}:** {item.description}" for item in dossier.evidence
+                    f"- `{item.id}` **{item.target}:** {item.description}" for item in dossier.evidence
                 ))
         if self.document.expansions:
             sections.append("## Lazy lore expansions")
             for expansion in self.document.expansions[-30:]:
-                sections.append(f"### {expansion.question}\n\n{expansion.summary or 'Additional canon was materialized in response to player curiosity.'}")
+                sections.append(
+                    f"### {expansion.question}\n\n"
+                    f"{expansion.summary or 'Additional canon was materialized in response to player curiosity or a world event.'}"
+                )
+        if self.document.evidence_discoveries:
+            sections.append("## Evidence actually discovered\n\n" + "\n".join(
+                f"- `{item.evidence_id}` via **{item.instrument_name}** at {item.scan_fraction:.0%}: {item.description}"
+                for item in self.document.evidence_discoveries.values()
+            ))
+        if self.document.scheduled_intents:
+            sections.append("## World intentions\n\n" + "\n".join(
+                f"- [{item.status}] **{item.actor}** / {item.action} at t={item.execute_at_ms}ms: {item.summary}"
+                for item in self.document.scheduled_intents.values()
+            ))
         return "\n\n".join(sections)
 
     def dossier(self, encounter_id: str) -> SituationDossier | None:
@@ -113,21 +134,78 @@ class NarrativeCanon:
 
     def commit_expansion(self, expansion: LoreExpansion) -> None:
         normalized = self._normalize(expansion.question)
-        if any(self._normalize(item.question) == normalized for item in self.document.expansions):
+        if any(
+            self._normalize(item.question) == normalized and item.encounter_id == expansion.encounter_id
+            for item in self.document.expansions
+        ):
             return
         self.document.expansions.append(expansion)
-        self.document.expansions = self.document.expansions[-200:]
+        self.document.expansions = self.document.expansions[-300:]
         self.save()
 
-    def question_already_expanded(self, question: str) -> bool:
+    def question_already_expanded(self, question: str, encounter_id: str | None = None) -> bool:
         normalized = self._normalize(question)
-        return any(self._normalize(item.question) == normalized for item in self.document.expansions)
+        return any(
+            self._normalize(item.question) == normalized
+            and (encounter_id is None or item.encounter_id == encounter_id)
+            for item in self.document.expansions
+        )
 
     @staticmethod
     def _normalize(text: str) -> str:
         return " ".join(text.lower().split())[:600]
 
-    def director_context(self, encounter_id: str | None = None, *, limit: int = 60) -> list[dict[str, Any]]:
+    def evidence_candidates(self, encounter_id: str) -> list[DossierEvidence]:
+        rows: list[DossierEvidence] = []
+        dossier = self.document.situations.get(encounter_id)
+        if dossier:
+            rows.extend(dossier.evidence)
+        for expansion in self.document.expansions:
+            if expansion.encounter_id == encounter_id:
+                rows.extend(expansion.new_evidence)
+        return [item for item in rows if item.id not in self.document.evidence_discoveries]
+
+    def commit_evidence_discovery(self, discovery: EvidenceDiscovery) -> None:
+        if discovery.evidence_id in self.document.evidence_discoveries:
+            return
+        self.document.evidence_discoveries[discovery.evidence_id] = discovery
+        self.save()
+
+    def schedule_intents(self, intents: list[ScheduledWorldIntent]) -> int:
+        added = 0
+        for intent in intents:
+            if intent.id in self.document.scheduled_intents:
+                continue
+            duplicate = any(
+                existing.status == "scheduled"
+                and existing.encounter_id == intent.encounter_id
+                and existing.actor.lower() == intent.actor.lower()
+                and existing.action == intent.action
+                and self._normalize(existing.summary) == self._normalize(intent.summary)
+                for existing in self.document.scheduled_intents.values()
+            )
+            if duplicate:
+                continue
+            self.document.scheduled_intents[intent.id] = intent
+            added += 1
+        if added:
+            self.save()
+        return added
+
+    def due_intents(self, universe_time_ms: int) -> list[ScheduledWorldIntent]:
+        return sorted(
+            (
+                item for item in self.document.scheduled_intents.values()
+                if item.status == "scheduled" and item.execute_at_ms <= universe_time_ms
+            ),
+            key=lambda item: item.execute_at_ms,
+        )
+
+    def update_intent(self, intent: ScheduledWorldIntent) -> None:
+        self.document.scheduled_intents[intent.id] = intent
+        self.save()
+
+    def director_context(self, encounter_id: str | None = None, *, limit: int = 80) -> list[dict[str, Any]]:
         dossiers = self._selected_dossiers(encounter_id)
         rows: list[dict[str, Any]] = []
         for dossier in dossiers:
@@ -138,13 +216,21 @@ class NarrativeCanon:
             rows.extend({"kind": "relationship", **item.model_dump(mode="json")} for item in dossier.relationships)
             rows.extend({"kind": "question", **item.model_dump(mode="json")} for item in dossier.open_questions)
             rows.extend({"kind": "evidence", **item.model_dump(mode="json")} for item in dossier.evidence)
-        for expansion in self.document.expansions[-20:]:
+        for expansion in self.document.expansions[-30:]:
+            if encounter_id and expansion.encounter_id and expansion.encounter_id != encounter_id:
+                continue
             rows.append({"kind": "expansion", "question": expansion.question, "summary": expansion.summary})
             rows.extend({"kind": "fact", **fact.model_dump(mode="json")} for fact in expansion.new_facts)
             rows.extend({"kind": "claim", **claim.model_dump(mode="json")} for claim in expansion.new_claims)
+        for discovery in self.document.evidence_discoveries.values():
+            if not encounter_id or discovery.encounter_id == encounter_id:
+                rows.append({"kind": "discovered_evidence", **discovery.model_dump(mode="json")})
+        for intent in self.document.scheduled_intents.values():
+            if not encounter_id or intent.encounter_id == encounter_id:
+                rows.append({"kind": "world_intent", **intent.model_dump(mode="json")})
         return rows[-limit:]
 
-    def npc_context(self, npc_name: str, encounter_id: str | None = None, *, limit: int = 40) -> list[dict[str, Any]]:
+    def npc_context(self, npc_name: str, encounter_id: str | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         names = {npc_name.lower()}
         for dossier in self._selected_dossiers(encounter_id):
@@ -163,7 +249,9 @@ class NarrativeCanon:
             note = dossier.actor_notes.get(npc_name)
             if note:
                 rows.append({"kind": "actor_note", "content": note})
-        for expansion in self.document.expansions[-20:]:
+        for expansion in self.document.expansions[-30:]:
+            if encounter_id and expansion.encounter_id and expansion.encounter_id != encounter_id:
+                continue
             for fact in expansion.new_facts:
                 if fact.visibility in {"public", "crew"} or any(name.lower() in names for name in fact.known_by):
                     rows.append({"kind": "known_fact", "subject": fact.subject, "content": fact.content})
@@ -175,7 +263,7 @@ class NarrativeCanon:
                 rows.append({"kind": "actor_note", "content": note})
         return rows[-limit:]
 
-    def crew_context(self, encounter_id: str | None = None, *, limit: int = 40) -> list[dict[str, Any]]:
+    def crew_context(self, encounter_id: str | None = None, *, limit: int = 60) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for dossier in self._selected_dossiers(encounter_id):
             for fact in dossier.facts:
@@ -184,13 +272,27 @@ class NarrativeCanon:
             for claim in dossier.claims:
                 if claim.visibility in {"crew", "public"}:
                     rows.append({"kind": "claim", "speaker": claim.speaker, "content": claim.content})
-        for expansion in self.document.expansions[-20:]:
+        for expansion in self.document.expansions[-30:]:
+            if encounter_id and expansion.encounter_id and expansion.encounter_id != encounter_id:
+                continue
             for fact in expansion.new_facts:
                 if fact.visibility in {"crew", "public"}:
                     rows.append({"kind": "known_fact", "subject": fact.subject, "content": fact.content})
             for claim in expansion.new_claims:
                 if claim.visibility in {"crew", "public"}:
                     rows.append({"kind": "claim", "speaker": claim.speaker, "content": claim.content})
+        for discovery in self.document.evidence_discoveries.values():
+            if not encounter_id or discovery.encounter_id == encounter_id:
+                rows.append({
+                    "kind": "observed_evidence",
+                    "instrument": discovery.instrument_name,
+                    "description": discovery.description,
+                    "reveals": discovery.reveals,
+                    "confidence": discovery.confidence,
+                })
+        for intent in self.document.scheduled_intents.values():
+            if intent.status == "executed" and intent.visibility in {"crew", "public"}:
+                rows.append({"kind": "world_development", "actor": intent.actor, "summary": intent.summary})
         return rows[-limit:]
 
     def _selected_dossiers(self, encounter_id: str | None) -> list[SituationDossier]:
@@ -200,6 +302,7 @@ class NarrativeCanon:
 
     def counts(self) -> dict[str, int]:
         dossiers = list(self.document.situations.values())
+        intents = list(self.document.scheduled_intents.values())
         return {
             "situations": len(dossiers),
             "entities": sum(len(item.entities) for item in dossiers),
@@ -207,4 +310,7 @@ class NarrativeCanon:
             "claims": sum(len(item.claims) for item in dossiers) + sum(len(item.new_claims) for item in self.document.expansions),
             "open_questions": sum(len(item.open_questions) for item in dossiers) + sum(len(item.new_questions) for item in self.document.expansions),
             "expansions": len(self.document.expansions),
+            "evidence_discovered": len(self.document.evidence_discoveries),
+            "scheduled_intents": sum(item.status == "scheduled" for item in intents),
+            "executed_intents": sum(item.status == "executed" for item in intents),
         }

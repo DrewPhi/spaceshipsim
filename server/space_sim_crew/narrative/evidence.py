@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ..models import CanonicalEvent, GameState, Observation, StationRole
 from .canon import NarrativeCanon
+from .discovery import DiscoveryTracker
 from .models import EvidenceDiscovery
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ class NarrativeEvidenceResolver:
 
     def __init__(self, canon: NarrativeCanon):
         self.canon = canon
+        self.discovery = DiscoveryTracker(canon)
 
     def resolve_scan_events(
         self,
@@ -93,10 +95,19 @@ class NarrativeEvidenceResolver:
                     state.crew_knowledge.append(knowledge)
                     state.crew_knowledge = state.crew_knowledge[-300:]
                 self.canon.commit_evidence_discovery(discovery)
+                discovery_state = self.discovery.record_evidence(encounter.id, evidence.id)
+                if evidence.narrative_role == "contradiction" and discovery_state.contradictions:
+                    contradiction = f"CONTRADICTION: {discovery_state.contradictions[-1]}"
+                    if contradiction not in state.crew_knowledge:
+                        state.crew_knowledge.append(contradiction)
+                        state.crew_knowledge = state.crew_knowledge[-300:]
+                self.discovery.sync_activity_board(state, encounter.id)
                 committed.append(engine.event(
                     "narrative_evidence_discovered",
                     payload={
                         "evidence_id": evidence.id,
+                        "narrative_role": evidence.narrative_role,
+                        "discovery_phase": discovery_state.phase,
                         "instrument_id": instrument.id,
                         "instrument": instrument.name,
                         "scan_fraction": threshold,

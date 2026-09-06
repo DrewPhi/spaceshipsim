@@ -194,6 +194,10 @@ class UniverseGodGameSession(GameSession):
         return events
 
     def _schedule_milestones(self, events: list[CanonicalEvent]) -> None:
+        command_science_events = self.science_runtime.process_events(self.state, self.engine, list(events))
+        if command_science_events:
+            self._persist(command_science_events)
+            events = [*events, *command_science_events]
         super()._schedule_milestones(events)
         encounter = self.state.current_encounter
         if not encounter or self.narrative_canon.dossier(encounter.id) is None:

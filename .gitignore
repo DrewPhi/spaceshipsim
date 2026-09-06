@@ -1,0 +1,16 @@
+.venv/
+.uv-cache/
+node_modules/
+dist/
+coverage/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+saves/
+*.sqlite3
+.env
+.tools/
+.ollama/

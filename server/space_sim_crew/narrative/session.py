@@ -12,6 +12,7 @@ from .canon import NarrativeCanon
 from .discovery import DiscoveryTracker
 from .evidence import NarrativeEvidenceResolver
 from .provider import LoreAwareProvider, narrative_provider_from_environment
+from .science import GenerativeScienceEngine, ScienceArchitect, ScientificCanon, ScientificRuntime
 from .world import OffscreenWorldSimulator
 
 
@@ -20,6 +21,8 @@ class UniverseGodGameSession(GameSession):
 
     WORLD_PLAN_TRIGGERS = {
         "narrative_evidence_discovered",
+        "scientific_prediction_verified",
+        "generated_scientific_capability_installed",
         "encounter_resolved",
         "remote_contact_exchange",
         "signal_reply_transmitted",
@@ -39,9 +42,13 @@ class UniverseGodGameSession(GameSession):
     ):
         super().__init__(state, save_store, provider, session_id=session_id)
         self.narrative_canon = NarrativeCanon(save_store.root, state.universe_id)
+        self.scientific_canon = ScientificCanon(save_store.root, state.universe_id)
+        self.engine = GenerativeScienceEngine(state, self.scientific_canon)
         self.narrative_provider = narrative_provider or narrative_provider_from_environment(provider)
         self.discovery = DiscoveryTracker(self.narrative_canon)
         self.universe_architect = UniverseArchitect(self.narrative_provider, self.narrative_canon)
+        self.science_architect = ScienceArchitect(self.narrative_provider, self.narrative_canon, self.scientific_canon)
+        self.science_runtime = ScientificRuntime(self.scientific_canon)
         self.evidence_resolver = NarrativeEvidenceResolver(self.narrative_canon)
         self.offscreen_world = OffscreenWorldSimulator(self.narrative_canon)
         self.scheduled_world_plans: set[str] = set()
@@ -95,6 +102,64 @@ class UniverseGodGameSession(GameSession):
                                 visibility="director",
                             )
                             self._persist([established_event])
+
+            current = self.state.current_encounter
+            if (
+                current
+                and current.id == encounter_id
+                and current.status == "active"
+                and self.narrative_canon.dossier(encounter_id) is not None
+                and self.scientific_canon.blueprint(encounter_id) is None
+            ):
+                state_snapshot = self.state.model_copy(deep=True)
+                encounter_snapshot = current.model_copy(deep=True)
+                blueprint = await self.science_architect.create_blueprint(state_snapshot, encounter_snapshot)
+                if blueprint is not None:
+                    async with self.lock:
+                        active = self.state.current_encounter
+                        if (
+                            active
+                            and active.id == encounter_id
+                            and active.status == "active"
+                            and self.scientific_canon.blueprint(encounter_id) is None
+                            and self.scientific_canon.commit_blueprint(blueprint)
+                        ):
+                            active.hidden_truth["science_phenomenon"] = {
+                                "committed": True,
+                                "phenomenon_id": blueprint.id,
+                                "novelty": blueprint.novelty,
+                                "mechanics": [item.primitive for item in blueprint.mechanics],
+                                "predictions": len(blueprint.predictions),
+                                "generated_capability": blueprint.capability.name if blueprint.capability else None,
+                            }
+                            director_event = self.engine.event(
+                                "scientific_phenomenon_authored",
+                                payload={
+                                    "phenomenon_id": blueprint.id,
+                                    "encounter_id": encounter_id,
+                                    "name": blueprint.name,
+                                    "novelty": blueprint.novelty,
+                                    "mechanics": [item.primitive for item in blueprint.mechanics],
+                                    "predictions": len(blueprint.predictions),
+                                },
+                                targets=[encounter_id],
+                                source_kind="approved_proposal",
+                                source_id="science_architect",
+                                visibility="director",
+                            )
+                            hook = f"Science anomaly: {blueprint.crew_hook}"
+                            if hook not in self.state.crew_knowledge:
+                                self.state.crew_knowledge.append(hook)
+                            hook_event = self.engine.event(
+                                "scientific_anomaly_detected",
+                                payload={"phenomenon_id": blueprint.id, "observation": blueprint.crew_hook},
+                                targets=[encounter_id, active.target_id],
+                                source_kind="simulation",
+                                source_id="scientific_runtime",
+                                visibility="crew",
+                                caused_by=[director_event.id],
+                            )
+                            self._persist([director_event, hook_event])
         if established_event and self.state.current_encounter:
             self._queue_world_plan(
                 self.state.model_copy(deep=True),
@@ -105,11 +170,13 @@ class UniverseGodGameSession(GameSession):
         await super()._develop_encounter(encounter_id)
 
     async def tick_once(self, dt: float) -> list[CanonicalEvent]:
-        """Run physics, then deterministically reveal lore and advance coarse actors."""
+        """Run physics, then deterministically reveal lore, science, and coarse actors."""
         async with self.lock:
             events = self.engine.tick(dt)
             evidence_events = self.evidence_resolver.resolve_scan_events(self.state, self.engine, events)
             events.extend(evidence_events)
+            science_events = self.science_runtime.process_events(self.state, self.engine, list(events))
+            events.extend(science_events)
             world_events = self.offscreen_world.execute_due(self.state, self.engine)
             events.extend(world_events)
             encounter = self.state.current_encounter
@@ -215,6 +282,7 @@ class UniverseGodGameSession(GameSession):
             **super().diagnostics(),
             "narrative_provider": self.narrative_provider.capabilities().name,
             "narrative_canon": self.narrative_canon.counts(),
+            "scientific_canon": self.scientific_canon.counts(),
             "deep_discovery": self.discovery.phase_context(encounter_id) if encounter_id and self.narrative_canon.dossier(encounter_id) else None,
             "discovery_board": self.discovery.crew_board(encounter_id) if encounter_id and self.narrative_canon.dossier(encounter_id) else None,
         }

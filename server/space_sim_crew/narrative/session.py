@@ -9,6 +9,7 @@ from ..models import CanonicalEvent
 from ..session import GameSession, SessionManager, create_game_state
 from .architect import UniverseArchitect
 from .canon import NarrativeCanon
+from .discovery import DiscoveryTracker
 from .evidence import NarrativeEvidenceResolver
 from .provider import LoreAwareProvider, narrative_provider_from_environment
 from .world import OffscreenWorldSimulator
@@ -39,11 +40,15 @@ class UniverseGodGameSession(GameSession):
         super().__init__(state, save_store, provider, session_id=session_id)
         self.narrative_canon = NarrativeCanon(save_store.root, state.universe_id)
         self.narrative_provider = narrative_provider or narrative_provider_from_environment(provider)
+        self.discovery = DiscoveryTracker(self.narrative_canon)
         self.universe_architect = UniverseArchitect(self.narrative_provider, self.narrative_canon)
         self.evidence_resolver = NarrativeEvidenceResolver(self.narrative_canon)
         self.offscreen_world = OffscreenWorldSimulator(self.narrative_canon)
         self.scheduled_world_plans: set[str] = set()
         self.ai = AIOrchestrator(LoreAwareProvider(provider, state, self.narrative_canon, self.universe_architect))
+        if state.current_encounter and self.narrative_canon.dossier(state.current_encounter.id):
+            self.discovery.ensure(state.current_encounter.id)
+            self.discovery.sync_activity_board(state, state.current_encounter.id)
 
     async def _develop_encounter(self, encounter_id: str) -> None:
         encounter = self.state.current_encounter
@@ -56,22 +61,33 @@ class UniverseGodGameSession(GameSession):
                     if current and current.id == encounter_id and current.status == "active":
                         if self.narrative_canon.dossier(encounter_id) is None:
                             self.narrative_canon.commit_dossier(encounter_id, dossier)
+                            discovery_state = self.discovery.ensure(encounter_id)
+                            self.discovery.sync_activity_board(self.state, encounter_id)
                             current.hidden_truth["narrative_dossier"] = {
                                 "committed": True,
                                 "entities": len(dossier.entities),
                                 "facts": len(dossier.facts),
                                 "questions": len(dossier.open_questions),
                                 "evidence_routes": len(dossier.evidence),
+                                "deep_discovery_shape": {
+                                    "surface": bool(dossier.surface_interpretation),
+                                    "deeper": bool(dossier.deeper_interpretation),
+                                    "contradiction": bool(dossier.central_contradiction),
+                                    "choice": bool(dossier.consequential_choice),
+                                    "future_hook": bool(dossier.future_hook),
+                                },
                             }
                             established_event = self.engine.event(
                                 "narrative_situation_established",
                                 payload={
                                     "encounter_id": encounter_id,
+                                    "phase": discovery_state.phase,
                                     "entities": len(dossier.entities),
                                     "facts": len(dossier.facts),
                                     "claims": len(dossier.claims),
                                     "questions": len(dossier.open_questions),
                                     "evidence_routes": len(dossier.evidence),
+                                    "contradiction_routes": sum(item.narrative_role == "contradiction" for item in dossier.evidence),
                                 },
                                 targets=[encounter_id],
                                 source_kind="approved_proposal",
@@ -96,6 +112,11 @@ class UniverseGodGameSession(GameSession):
             events.extend(evidence_events)
             world_events = self.offscreen_world.execute_due(self.state, self.engine)
             events.extend(world_events)
+            encounter = self.state.current_encounter
+            if encounter and self.narrative_canon.dossier(encounter.id):
+                for event in events:
+                    self.discovery.mark_event(encounter.id, event.event_type)
+                self.discovery.sync_activity_board(self.state, encounter.id)
             if events:
                 self._persist(events)
         if events:
@@ -110,6 +131,9 @@ class UniverseGodGameSession(GameSession):
         encounter = self.state.current_encounter
         if not encounter or self.narrative_canon.dossier(encounter.id) is None:
             return
+        for event in events:
+            self.discovery.mark_event(encounter.id, event.event_type)
+        self.discovery.sync_activity_board(self.state, encounter.id)
         for event in events:
             if event.event_type not in self.WORLD_PLAN_TRIGGERS:
                 continue
@@ -186,10 +210,13 @@ class UniverseGodGameSession(GameSession):
             self._persist([plan_event])
 
     def diagnostics(self) -> dict[str, Any]:
+        encounter_id = self.state.current_encounter.id if self.state.current_encounter else None
         return {
             **super().diagnostics(),
             "narrative_provider": self.narrative_provider.capabilities().name,
             "narrative_canon": self.narrative_canon.counts(),
+            "deep_discovery": self.discovery.phase_context(encounter_id) if encounter_id and self.narrative_canon.dossier(encounter_id) else None,
+            "discovery_board": self.discovery.crew_board(encounter_id) if encounter_id and self.narrative_canon.dossier(encounter_id) else None,
         }
 
 

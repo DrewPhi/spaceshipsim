@@ -1,17 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import random
 from typing import Any
 
 from ..ai import AIOrchestrator, AIProvider
+from ..models import CanonicalEvent
 from ..session import GameSession, SessionManager, create_game_state
 from .architect import UniverseArchitect
 from .canon import NarrativeCanon
+from .evidence import NarrativeEvidenceResolver
 from .provider import LoreAwareProvider, narrative_provider_from_environment
+from .world import OffscreenWorldSimulator
 
 
 class UniverseGodGameSession(GameSession):
     """GameSession with persistent AI-authored causal lore layered above physics."""
+
+    WORLD_PLAN_TRIGGERS = {
+        "narrative_evidence_discovered",
+        "encounter_resolved",
+        "remote_contact_exchange",
+        "signal_reply_transmitted",
+        "transmission_sent",
+        "weapon_fired",
+        "warning_shot_fired",
+        "salvage_claimed",
+    }
 
     def __init__(
         self,
@@ -25,10 +40,14 @@ class UniverseGodGameSession(GameSession):
         self.narrative_canon = NarrativeCanon(save_store.root, state.universe_id)
         self.narrative_provider = narrative_provider or narrative_provider_from_environment(provider)
         self.universe_architect = UniverseArchitect(self.narrative_provider, self.narrative_canon)
+        self.evidence_resolver = NarrativeEvidenceResolver(self.narrative_canon)
+        self.offscreen_world = OffscreenWorldSimulator(self.narrative_canon)
+        self.scheduled_world_plans: set[str] = set()
         self.ai = AIOrchestrator(LoreAwareProvider(provider, state, self.narrative_canon, self.universe_architect))
 
     async def _develop_encounter(self, encounter_id: str) -> None:
         encounter = self.state.current_encounter
+        established_event: CanonicalEvent | None = None
         if encounter and encounter.id == encounter_id and encounter.status == "active":
             if self.narrative_canon.dossier(encounter_id) is None:
                 dossier = await self.universe_architect.create_dossier(self.state, encounter.model_copy(deep=True))
@@ -44,7 +63,7 @@ class UniverseGodGameSession(GameSession):
                                 "questions": len(dossier.open_questions),
                                 "evidence_routes": len(dossier.evidence),
                             }
-                            event = self.engine.event(
+                            established_event = self.engine.event(
                                 "narrative_situation_established",
                                 payload={
                                     "encounter_id": encounter_id,
@@ -59,8 +78,112 @@ class UniverseGodGameSession(GameSession):
                                 source_id="universe_architect",
                                 visibility="director",
                             )
-                            self._persist([event])
+                            self._persist([established_event])
+        if established_event and self.state.current_encounter:
+            self._queue_world_plan(
+                self.state.model_copy(deep=True),
+                self.state.current_encounter.model_copy(deep=True),
+                established_event,
+                trigger="new narrative situation established",
+            )
         await super()._develop_encounter(encounter_id)
+
+    async def tick_once(self, dt: float) -> list[CanonicalEvent]:
+        """Run physics, then deterministically reveal lore and advance coarse actors."""
+        async with self.lock:
+            events = self.engine.tick(dt)
+            evidence_events = self.evidence_resolver.resolve_scan_events(self.state, self.engine, events)
+            events.extend(evidence_events)
+            world_events = self.offscreen_world.execute_due(self.state, self.engine)
+            events.extend(world_events)
+            if events:
+                self._persist(events)
+        if events:
+            await self.broadcast()
+            self._schedule_milestones(events)
+            if any(event.event_type == "system_entered" for event in events) and self.state.current_encounter:
+                self._schedule_director(self.state.current_encounter.id)
+        return events
+
+    def _schedule_milestones(self, events: list[CanonicalEvent]) -> None:
+        super()._schedule_milestones(events)
+        encounter = self.state.current_encounter
+        if not encounter or self.narrative_canon.dossier(encounter.id) is None:
+            return
+        for event in events:
+            if event.event_type not in self.WORLD_PLAN_TRIGGERS:
+                continue
+            key = f"world-plan:{event.id}"
+            if key in self.scheduled_world_plans:
+                continue
+            self.scheduled_world_plans.add(key)
+            self._queue_world_plan(
+                self.state.model_copy(deep=True),
+                encounter.model_copy(deep=True),
+                event.model_copy(deep=True),
+                trigger=f"canonical event {event.event_type}",
+                key=key,
+            )
+
+    def _queue_world_plan(
+        self,
+        state_snapshot,
+        encounter_snapshot,
+        event: CanonicalEvent,
+        *,
+        trigger: str,
+        key: str | None = None,
+    ) -> None:
+        task = asyncio.create_task(
+            self._plan_world_response(state_snapshot, encounter_snapshot, event, trigger=trigger),
+            name=f"world-plan-{event.id}",
+        )
+        self.ai_tasks.add(task)
+        task.add_done_callback(self.ai_tasks.discard)
+        if key:
+            task.add_done_callback(lambda _task, plan_key=key: self.scheduled_world_plans.discard(plan_key))
+
+    async def _plan_world_response(
+        self,
+        state_snapshot,
+        encounter_snapshot,
+        event: CanonicalEvent,
+        *,
+        trigger: str,
+    ) -> None:
+        intents = await self.universe_architect.plan_world_intentions(
+            state_snapshot,
+            encounter_snapshot,
+            trigger=trigger,
+            recent_events=[{
+                "event_type": event.event_type,
+                "payload": event.payload,
+                "universe_time_ms": event.universe_time_ms,
+            }],
+        )
+        if not intents:
+            return
+        async with self.lock:
+            added = self.narrative_canon.schedule_intents(intents)
+            if not added:
+                return
+            scheduled = [intent for intent in intents if intent.id in self.narrative_canon.document.scheduled_intents]
+            plan_event = self.engine.event(
+                "offscreen_world_intentions_scheduled",
+                payload={
+                    "trigger_event_id": event.id,
+                    "trigger": trigger,
+                    "count": added,
+                    "intent_ids": [intent.id for intent in scheduled],
+                    "execute_at_ms": [intent.execute_at_ms for intent in scheduled],
+                },
+                targets=[encounter_snapshot.id],
+                source_kind="approved_proposal",
+                source_id="universe_architect",
+                visibility="director",
+                caused_by=[event.id],
+            )
+            self._persist([plan_event])
 
     def diagnostics(self) -> dict[str, Any]:
         return {

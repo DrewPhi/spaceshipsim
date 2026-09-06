@@ -20,6 +20,15 @@ LoreEntityKind = Literal[
     "document",
     "technology",
 ]
+NarrativePhase = Literal[
+    "hook",
+    "investigation",
+    "contradiction",
+    "reinterpretation",
+    "decision",
+    "aftermath",
+]
+EvidenceRole = Literal["clue", "contradiction", "corroboration"]
 WorldIntentAction = Literal[
     "send_message",
     "create_lead",
@@ -75,6 +84,7 @@ class DossierEvidence(BaseModel):
     instrument_domains: list[str] = Field(default_factory=list, max_length=8)
     reveals: list[str] = Field(default_factory=list, max_length=8)
     minimum_scan_fraction: float = 0.75
+    narrative_role: EvidenceRole = "clue"
 
     @field_validator("minimum_scan_fraction")
     @classmethod
@@ -83,9 +93,14 @@ class DossierEvidence(BaseModel):
 
 
 class SituationDossier(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 2
     premise: str = Field(min_length=1, max_length=1200)
     immediate_stakes: str = Field(default="", max_length=800)
+    surface_interpretation: str = Field(default="", max_length=800)
+    deeper_interpretation: str = Field(default="", max_length=1000)
+    central_contradiction: str = Field(default="", max_length=800)
+    consequential_choice: str = Field(default="", max_length=800)
+    future_hook: str = Field(default="", max_length=800)
     entities: list[DossierEntity] = Field(default_factory=list, max_length=8)
     facts: list[DossierFact] = Field(default_factory=list, max_length=12)
     claims: list[DossierClaim] = Field(default_factory=list, max_length=8)
@@ -121,6 +136,23 @@ class EvidenceDiscovery(BaseModel):
     description: str
     reveals: list[str] = Field(default_factory=list)
     confidence: float = 0.8
+
+
+class DiscoveryState(BaseModel):
+    encounter_id: str
+    phase: NarrativePhase = "hook"
+    surface_interpretation: str = ""
+    deeper_interpretation: str = ""
+    central_contradiction: str = ""
+    consequential_choice: str = ""
+    future_hook: str = ""
+    discovered_evidence_ids: list[str] = Field(default_factory=list, max_length=24)
+    contradictions: list[str] = Field(default_factory=list, max_length=12)
+    contacted_actors: list[str] = Field(default_factory=list, max_length=24)
+    interest_topics: dict[str, int] = Field(default_factory=dict)
+    recent_questions: list[str] = Field(default_factory=list, max_length=20)
+    confrontation_count: int = 0
+    decision_available: bool = False
 
 
 class WorldIntentDraft(BaseModel):
@@ -162,9 +194,10 @@ class ScheduledWorldIntent(WorldIntentDraft):
 
 
 class NarrativeCanonDocument(BaseModel):
-    schema_version: int = 2
+    schema_version: int = 3
     universe_id: str
     situations: dict[str, SituationDossier] = Field(default_factory=dict)
     expansions: list[LoreExpansion] = Field(default_factory=list)
     evidence_discoveries: dict[str, EvidenceDiscovery] = Field(default_factory=dict)
     scheduled_intents: dict[str, ScheduledWorldIntent] = Field(default_factory=dict)
+    discovery_states: dict[str, DiscoveryState] = Field(default_factory=dict)
